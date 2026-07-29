@@ -51,10 +51,10 @@ export const ActiveDownloadsManager: React.FC<ActiveDownloadsManagerProps> = ({
       // ignore
     }
 
-    // Trigger synthetic browser download link
-    const sampleUrl = task.metadata.sampleVideoUrl || 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4';
+    // Download actual saved file from real backend server endpoint
+    const fileApiUrl = `/api/download/file/${task.id}`;
     const a = document.createElement('a');
-    a.href = sampleUrl;
+    a.href = fileApiUrl;
     a.download = task.fileName;
     a.target = '_blank';
     document.body.appendChild(a);

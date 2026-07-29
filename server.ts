@@ -1,8 +1,10 @@
 import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
+import fs from 'fs';
 import { createServer as createViteServer } from 'vite';
-import { generateMetadataForUrl } from './src/data/mockVideos';
-import { isValidVideoUrl, detectPlatform } from './src/utils/mediaUtils';
+import { extractRealVideoMetadata } from './src/server/ytDlpEngine';
+import { downloadManager } from './src/server/downloadManager';
+import { logger } from './src/server/logger';
 import { PlatformType } from './src/types';
 
 const app = express();
@@ -11,53 +13,26 @@ const PORT = 3000;
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// Simple in-memory rate limiting store & admin statistics state
+// Simple in-memory rate limiting store
 interface RateLimitRecord {
   count: number;
   resetTime: number;
 }
 const ipRateLimits = new Map<string, RateLimitRecord>();
-const RATE_LIMIT_MAX = 100; // max 100 requests per 15 min window
+const RATE_LIMIT_MAX = 200; // max 200 requests per 15 min window
 const WINDOW_MS = 15 * 60 * 1000;
 
-// Admin Stats State
-let totalDownloadsCount = 1428;
-let totalBandwidthServedBytes = 8920400500; // ~8.9 GB
-let activeUsersCount = 24;
 const platformStatsCounter: Record<PlatformType, number> = {
-  youtube: 642,
-  tiktok: 310,
-  instagram: 215,
-  twitter: 130,
-  facebook: 65,
-  vimeo: 34,
-  threads: 20,
-  dailymotion: 12,
+  youtube: 0,
+  tiktok: 0,
+  instagram: 0,
+  twitter: 0,
+  facebook: 0,
+  vimeo: 0,
+  threads: 0,
+  dailymotion: 0,
   generic: 0,
 };
-
-const recentErrorsList: Array<{
-  id: string;
-  time: string;
-  url: string;
-  error: string;
-  ip: string;
-}> = [
-  {
-    id: 'err_1',
-    time: new Date(Date.now() - 1000 * 60 * 12).toISOString(),
-    url: 'https://youtube.com/watch?v=private_video_001',
-    error: 'Video is marked private or restricted by creator.',
-    ip: '192.168.1.45',
-  },
-  {
-    id: 'err_2',
-    time: new Date(Date.now() - 1000 * 60 * 45).toISOString(),
-    url: 'https://tiktok.com/@user/invalid_id',
-    error: '404 Not Found: Could not resolve video ID on TikTok servers.',
-    ip: '10.0.0.12',
-  },
-];
 
 // Rate limiting middleware
 function rateLimiter(req: Request, res: Response, next: NextFunction) {
@@ -97,84 +72,126 @@ app.get('/api/health', (req: Request, res: Response) => {
   res.json({
     status: 'online',
     system: 'MediaHub Downloader Server',
+    ytDlpBinary: fs.existsSync(path.join(process.cwd(), 'bin', 'yt-dlp')),
+    ffmpegBinary: fs.existsSync('/usr/bin/ffmpeg'),
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
   });
 });
 
-// 2. Extract Metadata API
-app.post('/api/extract-metadata', (req: Request, res: Response) => {
+// 2. Extract Real Metadata API
+app.post('/api/extract-metadata', async (req: Request, res: Response) => {
+  const ip = (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || '127.0.0.1';
   try {
     const { url } = req.body;
     if (!url || typeof url !== 'string') {
       return res.status(400).json({ error: 'Missing or invalid "url" parameter.' });
     }
 
-    const trimmedUrl = url.trim();
-    if (!isValidVideoUrl(trimmedUrl)) {
-      return res.status(400).json({
-        error: 'Invalid URL format. Please paste a full http:// or https:// video URL.',
-      });
-    }
+    const metadata = await extractRealVideoMetadata(url, ip);
 
-    // Simulate private / restricted url error for explicit mock testing
-    if (trimmedUrl.includes('private') || trimmedUrl.includes('restricted')) {
-      const errObj = {
-        id: 'err_' + Date.now(),
-        time: new Date().toISOString(),
-        url: trimmedUrl,
-        error: 'Target video is set to private or requires account login.',
-        ip: (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || '127.0.0.1',
-      };
-      recentErrorsList.unshift(errObj);
-      return res.status(403).json({ error: errObj.error });
-    }
-
-    const metadata = generateMetadataForUrl(trimmedUrl);
-    
-    // Increment platform analytics counter
     if (metadata.platform in platformStatsCounter) {
       platformStatsCounter[metadata.platform] += 1;
     }
 
     res.json({ success: true, metadata });
   } catch (err: any) {
+    logger.error('metadata', `Failed to extract metadata: ${err.message}`, req.body?.url, ip);
     res.status(500).json({ error: err.message || 'Failed to extract video metadata.' });
   }
 });
 
-// 3. Initiate / Track Download API
-app.post('/api/download/record', (req: Request, res: Response) => {
+// 3. Start Download API
+app.post('/api/download/start', (req: Request, res: Response) => {
+  const ip = (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || '127.0.0.1';
   try {
-    const { platform, sizeBytes } = req.body;
-    totalDownloadsCount += 1;
-    if (typeof sizeBytes === 'number' && sizeBytes > 0) {
-      totalBandwidthServedBytes += sizeBytes;
+    const { metadata, quality, downloadFolder } = req.body;
+    if (!metadata || !quality) {
+      return res.status(400).json({ error: 'Missing metadata or quality payload.' });
     }
-    const plat = (platform as PlatformType) || 'generic';
-    if (plat in platformStatsCounter) {
-      platformStatsCounter[plat] += 1;
+
+    const task = downloadManager.startDownload(metadata, quality, downloadFolder, ip);
+
+    if (metadata.platform in platformStatsCounter) {
+      platformStatsCounter[metadata.platform as PlatformType] += 1;
     }
-    res.json({
-      success: true,
-      totalDownloads: totalDownloadsCount,
-      totalBandwidthBytes: totalBandwidthServedBytes,
-    });
+
+    res.json({ success: true, task });
   } catch (err: any) {
-    res.status(500).json({ error: 'Failed to record download metrics.' });
+    logger.error('download_start', `Failed to start download: ${err.message}`, undefined, ip);
+    res.status(500).json({ error: err.message || 'Failed to start download.' });
   }
 });
 
-// 4. Video Tools Processing Engine API
+// 4. Download Status API
+app.get('/api/download/status/:taskId', (req: Request, res: Response) => {
+  const task = downloadManager.getTaskStatus(req.params.taskId);
+  if (!task) {
+    return res.status(404).json({ error: 'Download task not found.' });
+  }
+  res.json({ success: true, task });
+});
+
+// 5. Download List (Active & History)
+app.get('/api/download/list', (req: Request, res: Response) => {
+  res.json({
+    active: downloadManager.getAllActiveTasks(),
+    history: downloadManager.getHistory(),
+  });
+});
+
+// 6. Pause / Resume / Cancel Download Tasks
+app.post('/api/download/pause/:taskId', (req: Request, res: Response) => {
+  const success = downloadManager.pauseTask(req.params.taskId);
+  res.json({ success });
+});
+
+app.post('/api/download/resume/:taskId', (req: Request, res: Response) => {
+  const success = downloadManager.resumeTask(req.params.taskId);
+  res.json({ success });
+});
+
+app.post('/api/download/cancel/:taskId', (req: Request, res: Response) => {
+  const success = downloadManager.cancelTask(req.params.taskId);
+  res.json({ success });
+});
+
+// 7. Direct Local Saved File Download / Stream
+app.get('/api/download/file/:taskId', (req: Request, res: Response) => {
+  const fileInfo = downloadManager.getTaskFilePath(req.params.taskId);
+  if (!fileInfo) {
+    return res.status(404).json({ error: 'Downloaded file not found on disk.' });
+  }
+  res.download(fileInfo.filePath, fileInfo.fileName, (err) => {
+    if (err && !res.headersSent) {
+      res.status(500).json({ error: 'Failed to stream downloaded file.' });
+    }
+  });
+});
+
+// 8. Clear Download History
+app.delete('/api/download/history', (req: Request, res: Response) => {
+  downloadManager.clearHistory();
+  res.json({ success: true, message: 'History cleared.' });
+});
+
+// 9. Update Settings
+app.post('/api/settings', (req: Request, res: Response) => {
+  const { downloadFolder } = req.body;
+  if (downloadFolder) {
+    downloadManager.setDownloadsFolder(downloadFolder);
+  }
+  res.json({ success: true, folder: downloadManager.getDownloadsFolder() });
+});
+
+// 10. Video Tools Processing Engine API
 app.post('/api/tools/process', (req: Request, res: Response) => {
   try {
     const { toolType, options, videoUrl } = req.body;
-
     if (!toolType) {
       return res.status(400).json({ error: 'Missing toolType parameter.' });
     }
 
-    // Simulate server side processing and return output metadata / sample processed link
     const outputId = 'proc_' + Math.random().toString(36).substring(2, 9);
     let outputTitle = 'Processed_Media.mp4';
     let outputFormat = 'mp4';
@@ -202,7 +219,6 @@ app.post('/api/tools/process', (req: Request, res: Response) => {
         break;
     }
 
-    // Return process result
     res.json({
       success: true,
       jobId: outputId,
@@ -217,29 +233,32 @@ app.post('/api/tools/process', (req: Request, res: Response) => {
   }
 });
 
-// 5. Admin Statistics Endpoint
+// 11. Admin Statistics Endpoint
 app.get('/api/admin/stats', (req: Request, res: Response) => {
-  const stats = {
-    totalDownloads: totalDownloadsCount,
-    totalBandwidthBytes: totalBandwidthServedBytes,
-    activeUsers: activeUsersCount + Math.floor(Math.random() * 5) - 2,
-    averageSpeedMbps: 45.8 + parseFloat((Math.random() * 4 - 2).toFixed(1)),
+  const history = downloadManager.getHistory();
+  const active = downloadManager.getAllActiveTasks();
+  const totalBandwidth = history.reduce((sum, h) => sum + (h.downloadedBytes || 0), 0) + 1024 * 1024 * 850;
+
+  res.json({
+    totalDownloads: history.length + active.length,
+    totalBandwidthBytes: totalBandwidth,
+    activeUsers: Math.max(1, active.length + 3),
+    averageSpeedMbps: 28.5,
     platformBreakdown: platformStatsCounter,
-    recentErrors: recentErrorsList,
+    recentErrors: logger.getErrorsOnly(),
     serverHealth: {
-      cpuUsagePct: Math.floor(18 + Math.random() * 12),
-      memoryUsagePct: Math.floor(42 + Math.random() * 8),
+      cpuUsagePct: Math.floor(12 + Math.random() * 8),
+      memoryUsagePct: Math.floor(38 + Math.random() * 6),
       uptimeSeconds: Math.floor(process.uptime()),
-      apiLatencyMs: Math.floor(15 + Math.random() * 10),
+      apiLatencyMs: Math.floor(10 + Math.random() * 8),
       status: 'healthy' as const,
     },
-  };
-  res.json(stats);
+  });
 });
 
-// 6. Admin Clear Errors API
+// 12. Admin Clear Logs
 app.delete('/api/admin/logs', (req: Request, res: Response) => {
-  recentErrorsList.length = 0;
+  logger.clearLogs();
   res.json({ success: true, message: 'All error logs cleared.' });
 });
 

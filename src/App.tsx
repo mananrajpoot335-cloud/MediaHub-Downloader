@@ -48,6 +48,26 @@ export default function App() {
     }
   }, [darkMode]);
 
+  // Sync tasks with backend
+  const fetchTasksFromBackend = async () => {
+    try {
+      const res = await fetch('/api/download/list');
+      if (res.ok) {
+        const data = await res.json();
+        setActiveTasks(data.active || []);
+        setHistoryTasks(data.history || []);
+      }
+    } catch {
+      // Ignore network errors during polling
+    }
+  };
+
+  useEffect(() => {
+    fetchTasksFromBackend();
+    const interval = setInterval(fetchTasksFromBackend, 800);
+    return () => clearInterval(interval);
+  }, []);
+
   // Toast Helper
   const addToast = (type: 'success' | 'error' | 'info', title: string, message?: string) => {
     const newToast: ToastMessage = {
@@ -97,94 +117,81 @@ export default function App() {
     }
   };
 
-  // Start Download Simulation & Progress Engine
-  const handleStartDownload = (quality: VideoQualityOption) => {
+  // Start Real Download via Server API `/api/download/start`
+  const handleStartDownload = async (quality: VideoQualityOption) => {
     if (!currentMetadata) return;
 
-    const taskId = 'task_' + Date.now();
-    const newTask: DownloadTask = {
-      id: taskId,
-      metadata: currentMetadata,
-      quality,
-      status: 'downloading',
-      progress: 0,
-      speedMbps: 25.4 + Math.random() * 15,
-      downloadedBytes: 0,
-      totalBytes: quality.sizeBytes,
-      downloadUrl: currentMetadata.sampleVideoUrl || 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4',
-      fileName: `${currentMetadata.title.slice(0, 25).replace(/[^a-zA-Z0-9]/g, '_')}_${quality.label.replace(/\s+/g, '_')}.${quality.format}`,
-      timestamp: new Date().toISOString(),
-    };
-
-    setActiveTasks((prev) => [newTask, ...prev]);
-    addToast('info', 'Download Started', `Downloading ${quality.label} (${newTask.fileName})`);
-
-    // Record server-side download metrics
-    fetch('/api/download/record', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        platform: currentMetadata.platform,
-        sizeBytes: quality.sizeBytes,
-      }),
-    }).catch(() => {});
-
-    // Stream / Progress Timer Simulation
-    const interval = setInterval(() => {
-      setActiveTasks((prevTasks) => {
-        return prevTasks.map((t) => {
-          if (t.id !== taskId || t.status !== 'downloading') return t;
-
-          const newProgress = Math.min(100, t.progress + (15 + Math.random() * 20));
-          const newDownloaded = Math.round((newProgress / 100) * t.totalBytes);
-
-          if (newProgress >= 100) {
-            clearInterval(interval);
-            const finishedTask: DownloadTask = {
-              ...t,
-              progress: 100,
-              status: 'completed',
-              downloadedBytes: t.totalBytes,
-            };
-
-            // Add to history
-            setHistoryTasks((hist) => [finishedTask, ...hist]);
-            addToast('success', 'Download Complete!', finishedTask.fileName);
-
-            return finishedTask;
-          }
-
-          return {
-            ...t,
-            progress: newProgress,
-            downloadedBytes: newDownloaded,
-            speedMbps: 20 + Math.random() * 25,
-          };
-        });
+    try {
+      addToast('info', 'Starting Download...', `Initiating ${quality.label} download.`);
+      const res = await fetch('/api/download/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          metadata: currentMetadata,
+          quality,
+          downloadFolder: settings.downloadFolder,
+        }),
       });
-    }, 400);
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to start download process.');
+      }
+
+      if (data.task) {
+        setActiveTasks((prev) => [data.task, ...prev]);
+        addToast('success', 'Download Active!', `${data.task.fileName} is downloading.`);
+      }
+      fetchTasksFromBackend();
+    } catch (err: any) {
+      addToast('error', 'Download Error', err.message);
+    }
   };
 
-  // Task Control Handlers
-  const handlePauseTask = (id: string) => {
-    setActiveTasks((prev) =>
-      prev.map((t) => (t.id === id ? { ...t, status: 'paused' } : t))
-    );
+  // Task Control Handlers with Real Backend API Calls
+  const handlePauseTask = async (id: string) => {
+    try {
+      await fetch(`/api/download/pause/${id}`, { method: 'POST' });
+      fetchTasksFromBackend();
+      addToast('info', 'Download Paused');
+    } catch {
+      // Ignore
+    }
   };
 
-  const handleResumeTask = (id: string) => {
-    setActiveTasks((prev) =>
-      prev.map((t) => (t.id === id ? { ...t, status: 'downloading' } : t))
-    );
+  const handleResumeTask = async (id: string) => {
+    try {
+      await fetch(`/api/download/resume/${id}`, { method: 'POST' });
+      fetchTasksFromBackend();
+      addToast('info', 'Download Resumed');
+    } catch {
+      // Ignore
+    }
   };
 
-  const handleCancelTask = (id: string) => {
-    setActiveTasks((prev) => prev.filter((t) => t.id !== id));
-    addToast('info', 'Download Cancelled');
+  const handleCancelTask = async (id: string) => {
+    try {
+      await fetch(`/api/download/cancel/${id}`, { method: 'POST' });
+      setActiveTasks((prev) => prev.filter((t) => t.id !== id));
+      addToast('info', 'Download Cancelled');
+      fetchTasksFromBackend();
+    } catch {
+      // Ignore
+    }
   };
 
   const handleClearCompleted = () => {
     setActiveTasks((prev) => prev.filter((t) => t.status !== 'completed'));
+  };
+
+  const handleClearHistory = async () => {
+    try {
+      await fetch('/api/download/history', { method: 'DELETE' });
+      setHistoryTasks([]);
+      addToast('info', 'History Cleared', 'All download history records wiped.');
+    } catch {
+      // Ignore
+    }
   };
 
   const handleOpenInTools = (item: VideoMetadata | DownloadTask, toolType: VideoToolType) => {
@@ -256,7 +263,7 @@ export default function App() {
         {activeTab === 'history' && (
           <DownloadHistory
             history={historyTasks}
-            onClearHistory={() => setHistoryTasks([])}
+            onClearHistory={handleClearHistory}
             onRedownload={(task) => {
               setActiveTab('downloader');
               setCurrentMetadata(task.metadata);
@@ -275,9 +282,14 @@ export default function App() {
         {activeTab === 'settings' && (
           <SettingsSection
             settings={settings}
-            onUpdateSettings={(newSettings) =>
-              setSettings((prev) => ({ ...prev, ...newSettings }))
-            }
+            onUpdateSettings={(newSettings) => {
+              setSettings((prev) => ({ ...prev, ...newSettings }));
+              fetch('/api/settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(newSettings),
+              }).catch(() => {});
+            }}
             darkMode={darkMode}
             setDarkMode={setDarkMode}
             onToast={addToast}
