@@ -169,6 +169,20 @@ app.get('/api/download/file/:taskId', (req: Request, res: Response) => {
   });
 });
 
+app.get('/api/download/open-folder/:taskId', (req: Request, res: Response) => {
+  const task = downloadManager.getTaskStatus(req.params.taskId);
+  if (!task) {
+    return res.status(404).json({ error: 'Task not found.' });
+  }
+  const folder = downloadManager.getDownloadsFolder();
+  res.json({
+    success: true,
+    folder,
+    fileName: task.fileName,
+    absolutePath: path.join(folder, task.fileName),
+  });
+});
+
 // 8. Clear Download History
 app.delete('/api/download/history', (req: Request, res: Response) => {
   downloadManager.clearHistory();

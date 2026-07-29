@@ -90,42 +90,59 @@ function parseYtDlpJson(info: any, originalUrl: string, platform: PlatformType):
     thumbnail = 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=800&q=80';
   }
 
-  // Parse available formats / qualities
+  // Parse real available formats / qualities
   const qualities: VideoQualityOption[] = [];
-  const baseSizeMb = (durationSeconds / 60) * 15;
+  const baseSizeMb = Math.max(1, (durationSeconds / 60) * 14);
 
   if (Array.isArray(info.formats) && info.formats.length > 0) {
-    // Collect distinct heights (e.g. 1080, 720, 480, 360)
-    const availableHeights = new Set<number>();
+    // Map heights to their best format representation
+    const heightMap = new Map<number, { width: number; height: number; fps: number; filesize: number; tbr: number; formatId: string }>();
+
     info.formats.forEach((f: any) => {
       if (f.height && f.height >= 144) {
-        availableHeights.add(f.height);
+        const existing = heightMap.get(f.height);
+        const sz = f.filesize || f.filesize_approx || 0;
+        const bitrate = f.tbr || 0;
+
+        if (!existing || bitrate > existing.tbr || sz > existing.filesize) {
+          heightMap.set(f.height, {
+            width: f.width || Math.round((f.height * 16) / 9),
+            height: f.height,
+            fps: f.fps || 30,
+            filesize: sz,
+            tbr: bitrate,
+            formatId: f.format_id || '',
+          });
+        }
       }
     });
 
-    const sortedHeights = Array.from(availableHeights).sort((a, b) => b - a);
+    const sortedHeights = Array.from(heightMap.keys()).sort((a, b) => b - a);
 
     if (sortedHeights.length > 0) {
       sortedHeights.forEach((h, index) => {
+        const fmt = heightMap.get(h)!;
         let label = `${h}p`;
-        if (h >= 2160) label = '4K Ultra HD';
+        if (h >= 4320) label = '8K Ultra HD';
+        else if (h >= 2160) label = '4K Ultra HD';
         else if (h >= 1440) label = '2K Quad HD';
         else if (h >= 1080) label = '1080p Full HD';
         else if (h >= 720) label = '720p HD';
         else if (h >= 480) label = '480p SD';
-        else label = `${h}p Standard`;
+        else if (h >= 360) label = '360p Medium';
+        else label = `${h}p Low`;
 
-        const aspectWidth = Math.round((h * 16) / 9);
-        const estSize = Math.round(baseSizeMb * (h / 720) * 1024 * 1024);
+        const estSize = fmt.filesize > 0 ? fmt.filesize : Math.round(baseSizeMb * (h / 720) * 1024 * 1024);
+        const bitrateStr = fmt.tbr > 0 ? `${Math.round(fmt.tbr)} kbps` : `${Math.round(h * 5.5)} kbps`;
 
         qualities.push({
-          id: `q_${h}p`,
+          id: `bestvideo[height<=${h}]+bestaudio/best[height<=${h}]/best`,
           label,
-          resolution: `${aspectWidth}x${h}`,
-          fps: 30,
+          resolution: `${fmt.width}x${fmt.height}`,
+          fps: fmt.fps,
           format: 'mp4',
           sizeBytes: Math.max(1024 * 512, estSize),
-          bitrate: `${Math.round(h * 6.5)} kbps`,
+          bitrate: bitrateStr,
           type: 'video',
           isBest: index === 0,
         });
@@ -133,11 +150,11 @@ function parseYtDlpJson(info: any, originalUrl: string, platform: PlatformType):
     }
   }
 
-  // Standard qualities fallback if no specific format list height extracted
+  // Fallback quality options if no specific formats mapped
   if (qualities.length === 0) {
     qualities.push(
       {
-        id: 'q_1080',
+        id: 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best',
         label: '1080p Full HD',
         resolution: '1920x1080',
         fps: 30,
@@ -148,7 +165,7 @@ function parseYtDlpJson(info: any, originalUrl: string, platform: PlatformType):
         isBest: true,
       },
       {
-        id: 'q_720',
+        id: 'bestvideo[height<=720]+bestaudio/best[height<=720]/best',
         label: '720p HD',
         resolution: '1280x720',
         fps: 30,
@@ -158,7 +175,7 @@ function parseYtDlpJson(info: any, originalUrl: string, platform: PlatformType):
         type: 'video',
       },
       {
-        id: 'q_480',
+        id: 'bestvideo[height<=480]+bestaudio/best[height<=480]/best',
         label: '480p SD',
         resolution: '854x480',
         fps: 30,
@@ -170,10 +187,10 @@ function parseYtDlpJson(info: any, originalUrl: string, platform: PlatformType):
     );
   }
 
-  // Always append high quality MP3 audio options
+  // MP3 Audio Options
   qualities.push(
     {
-      id: 'q_mp3_high',
+      id: 'bestaudio/best',
       label: 'Audio MP3 (320kbps High Quality)',
       resolution: 'Audio Only',
       fps: 0,
@@ -183,7 +200,7 @@ function parseYtDlpJson(info: any, originalUrl: string, platform: PlatformType):
       type: 'audio',
     },
     {
-      id: 'q_mp3_std',
+      id: 'bestaudio/best',
       label: 'Audio MP3 (128kbps Standard)',
       resolution: 'Audio Only',
       fps: 0,
@@ -194,7 +211,6 @@ function parseYtDlpJson(info: any, originalUrl: string, platform: PlatformType):
     }
   );
 
-  // Stream URL or playable sample URL
   let sampleVideoUrl = 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4';
   if (info.url && info.url.startsWith('http')) {
     sampleVideoUrl = info.url;

@@ -71,9 +71,20 @@ class DownloadManager {
     const targetFolder = outputDir ? outputDir.replace(/^~/, process.env.HOME || '/root') : this.downloadsFolder;
     this.ensureFolder(targetFolder);
 
-    const safeTitle = metadata.title.slice(0, 30).replace(/[^a-zA-Z0-9_\-]/g, '_');
-    const fileName = `${safeTitle}_${quality.label.replace(/\s+/g, '_')}.${quality.format}`;
-    const filePath = path.join(targetFolder, fileName);
+    const safeTitle = metadata.title.slice(0, 35).replace(/[^a-zA-Z0-9_\-]/g, '_');
+    const ext = quality.type === 'audio' ? 'mp3' : (quality.format || 'mp4');
+    let fileName = `${safeTitle}_${quality.label.replace(/[^a-zA-Z0-9_\-]/g, '_')}.${ext}`;
+    let filePath = path.join(targetFolder, fileName);
+
+    // Unique filename conflict resolution
+    let counter = 1;
+    const nameWithoutExt = path.basename(fileName, `.${ext}`);
+    while (fs.existsSync(filePath)) {
+      fileName = `${nameWithoutExt}_(${counter}).${ext}`;
+      filePath = path.join(targetFolder, fileName);
+      counter++;
+    }
+
     const taskId = 'task_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6);
 
     const task: DownloadTask = {
@@ -105,18 +116,22 @@ class DownloadManager {
 
     // Check if yt-dlp binary exists & executable
     if (fs.existsSync(YT_DLP_BINARY)) {
-      const formatArg = quality.type === 'audio' ? 'bestaudio/best' : (quality.id.includes('1080') ? 'bestvideo[height<=1080]+bestaudio/best' : 'best');
+      const formatArg = quality.id && quality.id.length > 2 ? quality.id : (quality.type === 'audio' ? 'bestaudio/best' : 'bestvideo+bestaudio/best');
       const args = [
         '--no-playlist',
         '--no-warnings',
         '--newline',
+        '--ffmpeg-location', '/usr/bin',
         '-f', formatArg,
-        '-o', filePath,
       ];
+
       if (quality.type === 'audio') {
         args.push('-x', '--audio-format', 'mp3');
+      } else {
+        args.push('--merge-output-format', 'mp4');
       }
-      args.push(url);
+
+      args.push('-o', filePath, url);
 
       try {
         const child = spawn(YT_DLP_BINARY, args);
@@ -148,7 +163,7 @@ class DownloadManager {
         });
 
         child.stderr.on('data', (data: Buffer) => {
-          logger.info('yt_dlp', `yt-dlp output: ${data.toString().trim()}`, url, ip);
+          logger.info('ffmpeg', `yt-dlp/ffmpeg stdout/err: ${data.toString().trim().slice(0, 200)}`, url, ip);
         });
 
         child.on('close', (code) => {

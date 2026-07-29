@@ -12,7 +12,8 @@ import {
   Wrench, 
   ExternalLink,
   Loader2,
-  Trash2
+  Trash2,
+  Folder
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import confetti from 'canvas-confetti';
@@ -38,6 +39,18 @@ export const ActiveDownloadsManager: React.FC<ActiveDownloadsManagerProps> = ({
 
   const activeCount = tasks.filter((t) => t.status === 'downloading' || t.status === 'queued').length;
   const completedCount = tasks.filter((t) => t.status === 'completed').length;
+
+  const handleOpenFolder = async (task: DownloadTask) => {
+    try {
+      const res = await fetch(`/api/download/open-folder/${task.id}`);
+      if (res.ok) {
+        const data = await res.json();
+        alert(`Saved Location:\n${data.absolutePath}`);
+      }
+    } catch {
+      // ignore
+    }
+  };
 
   const triggerFileDownload = (task: DownloadTask) => {
     // Fire confetti for celebration
@@ -191,6 +204,14 @@ export const ActiveDownloadsManager: React.FC<ActiveDownloadsManagerProps> = ({
                           >
                             <Download className="w-3.5 h-3.5" />
                             <span>Save File</span>
+                          </button>
+
+                          <button
+                            onClick={() => handleOpenFolder(task)}
+                            className="p-2 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300"
+                            title="Open Saved Folder Location"
+                          >
+                            <Folder className="w-4 h-4" />
                           </button>
 
                           <button
